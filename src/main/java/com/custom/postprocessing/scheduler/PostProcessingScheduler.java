@@ -155,11 +155,12 @@ public class PostProcessingScheduler {
 	@Autowired
 	private PostProcessUtil postProcessUtil;
 
-	List<String> pclFileList = new LinkedList<>();
+	List<String> invalidFileList = new LinkedList<>();
 
 	@Scheduled(cron = "${cron-job-print-interval}")
 	public void postProcessing() {
 		String message = smartCommPostProcessing();
+		deleteFiles(invalidFileList);
 		logger.info(message);
 	}
 
@@ -191,12 +192,14 @@ public class PostProcessingScheduler {
 			copyFileToTargetDirectory(updateLogFile.toString(), ROOT_DIRECTORY, LOG_DIRECTORY);
 			logFileName.delete();
 			updateLogFile.delete();
+			
 		} catch (Exception exception) {
 			logger.info("Exception smartComPostProcessing() " + exception.getMessage());
 			statusMessage = "error in copy file to blob directory";
 		}
 		logger.info(statusMessage);
 		logger.info("postprocessing ended");
+		deleteFiles(invalidFileList);
 		return statusMessage;
 	}
 
@@ -220,10 +223,14 @@ public class PostProcessingScheduler {
 				CloudBlockBlob cloudBlockBlob = archiveDirectory.getBlockBlobReference(fileName);
 				cloudBlockBlob.downloadToFile(fileName);
 				dstBlobClient.beginCopy(updateSrcUrl, null);
+				srcBlobClient.delete();
 				if (fileExt.equals("xml")) {
+					boolean validXmlInputFIle = xmlFileDocumentReader(fileName, currentDate, currentDateTime);
+					if (!validXmlInputFIle) {
+						continue;
+					}
 					fileSeparateOperation(fileName, currentDate, currentDateTime, targetProcessedPrintDirectory);
 				}
-				srcBlobClient.delete();
 			}
 		} catch (Exception exception) {
 			logger.info("Exception moveSourceToTargetDirectory() " + exception.getMessage());
@@ -264,7 +271,7 @@ public class PostProcessingScheduler {
 			if (!(ccRecipientCountCheck) || !validFileCheck) {
 				failedFileProcessing(xmlInputFile, currentDate, currentDateTime);
 				failedFileProcessing(pdfInputFile, currentDate, currentDateTime);
-			}else {
+			} else {
 				archiveOnlyOperation(pdfInputFile, currentDate, currentDateTime);
 				archiveOnlyOperation(xmlInputFile, currentDate, currentDateTime);
 				fileName = FilenameUtils.removeExtension(fileName);
@@ -672,7 +679,6 @@ public class PostProcessingScheduler {
 			String currentDate = currentDate();
 			copyFileToTargetDirectory(outputPclFile, OUTPUT_DIRECTORY + TRANSIT_DIRECTORY, currentDate);
 			logger.info("generate pcl file is:" + outputPclFile);
-			pclFileList.add(outputPclFile);
 		} catch (Exception exception) {
 			statusMessage = "error in pcl generate";
 			logger.info("Exception pclFileCreation() " + exception.getMessage());
@@ -699,7 +705,9 @@ public class PostProcessingScheduler {
 				}
 				updatedFile = updatePDFFile.toString();
 			} else if (PostProcessingConstant.XML_TYPE.equals(FilenameUtils.getExtension(file.toString()))) {
-				Document document = xmlFileDocumentReader(file.toString());
+				DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+				DocumentBuilder builder = factory.newDocumentBuilder();
+				Document document = builder.parse(file);
 				if (Objects.isNull(document)) {
 					logger.info("error in read xml processing file ");
 				}
@@ -771,7 +779,9 @@ public class PostProcessingScheduler {
 				updatePDFFile.delete();
 			} else if (PostProcessingConstant.XML_TYPE.equals(fileExt)) {
 
-				Document document = xmlFileDocumentReader(copyOriginalFile.toString());
+				DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+				DocumentBuilder builder = factory.newDocumentBuilder();
+				Document document = builder.parse(copyOriginalFile);
 				if (Objects.isNull(document)) {
 					logger.info("error in read xml processing file ");
 				}
@@ -877,7 +887,9 @@ public class PostProcessingScheduler {
 			pdfInputFile.delete();
 
 			File xmlInputFile = new File(xmlFile);
-			Document document = xmlFileDocumentReader(xmlInputFile.toString());
+			DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+			DocumentBuilder builder = factory.newDocumentBuilder();
+			Document document = builder.parse(xmlInputFile);
 			if (Objects.isNull(document)) {
 				logger.info("error in read xml processing file");
 			}
@@ -932,7 +944,9 @@ public class PostProcessingScheduler {
 				String newFileName = xmlFile.toString();
 				newFileName = newFileName.replace("_Primary", "_" + i);
 
-				Document document = xmlFileDocumentReader(fileName);
+				DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+				DocumentBuilder builder = factory.newDocumentBuilder();
+				Document document = builder.parse(new File(fileName));
 				if (Objects.isNull(document)) {
 					logger.info("error in read xml processing file ");
 				}
@@ -996,11 +1010,20 @@ public class PostProcessingScheduler {
 		}
 	}
 
-	public Document xmlFileDocumentReader(String fileName)
+	public boolean xmlFileDocumentReader(String fileName, String currentDate, String currentDateTime)
 			throws ParserConfigurationException, SAXException, IOException {
-		Document document = null;
+		boolean validaXmlFile = true;
+		String pdfInputFile = fileName.replace(".xml", ".pdf");
+		File pdfFile = new File(pdfInputFile);
 		try {
+			if (!(pdfFile.exists())) {
+				failedFileProcessing(fileName, currentDate, currentDateTime);
+				failedFileProcessing(pdfFile.toString(), currentDate, currentDateTime);
+				pdfFile.delete();
+				return false;
+			}
 			DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+
 			// ET - added to mitigate vulnerability - Improper Restriction of XML External
 			// Entity Reference CWE ID 611
 			factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
@@ -1010,19 +1033,28 @@ public class PostProcessingScheduler {
 			factory.setXIncludeAware(false);
 			factory.setExpandEntityReferences(false);
 			DocumentBuilder builder = factory.newDocumentBuilder();
-			document = builder.parse(new File(fileName));
+			Document document = builder.parse(new File(fileName));
 			document.getDocumentElement().normalize();
 		} catch (Exception documentException) {
-			logger.info("Exception xmlFileDocumentReader() :" + documentException.getMessage());
+			logger.info("invalid xml for processing :" + fileName + " " + documentException.getMessage());
+			validaXmlFile = false;
+			invalidFileList.add(fileName);
 		}
-		return document;
+		if (!validaXmlFile) {
+			failedFileProcessing(fileName, currentDate, currentDateTime);
+			failedFileProcessing(pdfInputFile, currentDate, currentDateTime);
+			pdfFile.delete();
+		}
+		return validaXmlFile;
 	}
 
 	public boolean validateXmlInputFile(String fileName) {
 		boolean validXmlFile = true;
 		try {
 			File file = new File(fileName);
-			Document document = xmlFileDocumentReader(file.toString());
+			DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+			DocumentBuilder builder = factory.newDocumentBuilder();
+			Document document = builder.parse(file);
 			if (Objects.isNull(document)) {
 				logger.info("error in read xml processing file ");
 			}
